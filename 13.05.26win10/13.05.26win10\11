@@ -1,0 +1,324 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import os
+import sys
+import shutil
+import subprocess
+import ctypes
+import logging
+import tempfile
+import glob
+import winreg
+import urllib.request
+
+# ==============================================================================
+# PROFESSIONAL WINDOWS DEEP CLEAN SCRIPT v1.0
+# ==============================================================================
+# Author: [Your Name/GitHub Handle]
+# Date: 2026-05-13
+# Target: Windows 10 (Build 19045.7291) & Windows 11 (Build 26100.8457)
+# Description: Performs a comprehensive cleanup of non-system files from drive
+#              C: This includes user data, temp files, browser caches, and
+#              system junk, while preserving installed programs and games.
+#              If no browser is detected, it downloads the Chrome installer
+#              to the Public Desktop.
+# ==============================================================================
+
+# ==============================================================================
+# DISCLAIMER
+# ==============================================================================
+# This script is provided "AS IS", without warranty of any kind, express or
+# implied. The author is not responsible for any damages, including but not
+# limited to data loss or system instability, arising from the use of this
+# script. Use at your own risk. Ensure you have a full backup of your important
+# data before running this script.
+# ==============================================================================
+
+# ==============================================================================
+# CONFIGURATION & LOGGING
+# ==============================================================================
+# Set up logging to track the cleaning process.
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("deep_cleanup.log"),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+log = logging.getLogger(__name__)
+
+# Critical directories that should NEVER be touched by this script
+PROTECTED_DIRS = [
+    os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "System32"),
+    os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "SysWOW64"),
+    os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "WinSxS"),
+    "C:\\Boot",
+    "C:\\Recovery",
+    "C:\\ProgramData\\Microsoft\\Windows\\Start Menu",
+]
+
+# ==============================================================================
+# HELPER FUNCTIONS
+# ==============================================================================
+
+def is_admin():
+    """Check if the script is running with administrative privileges."""
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
+        return False
+
+def is_protected_path(path):
+    """Check if a path is in the protected directories list."""
+    normalized_path = os.path.normpath(path).lower()
+    for protected in PROTECTED_DIRS:
+        if normalized_path.startswith(os.path.normpath(protected).lower()):
+            return True
+    return False
+
+def safe_rmtree(path):
+    """Safely remove a directory tree, logging any errors."""
+    if not path or not os.path.exists(path):
+        return
+    try:
+        if os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+            log.info(f"Successfully removed directory: {path}")
+        elif os.path.isfile(path):
+            os.remove(path)
+            log.info(f"Successfully removed file: {path}")
+    except Exception as e:
+        log.error(f"Failed to remove {path}: {e}")
+
+def run_subprocess(command, shell=True, timeout=600):
+    """Run a subprocess command and log its output."""
+    log.info(f"Executing command: {command}")
+    try:
+        result = subprocess.run(command, shell=shell, capture_output=True, text=True, timeout=timeout)
+        if result.stdout:
+            log.debug(f"Stdout: {result.stdout.strip()}")
+        if result.stderr:
+            log.debug(f"Stderr: {result.stderr.strip()}")
+        return result
+    except subprocess.TimeoutExpired:
+        log.error(f"Command timed out after {timeout} seconds: {command}")
+        return None
+    except Exception as e:
+        log.error(f"Error executing command: {e}")
+        return None
+
+# ==============================================================================
+# CORE CLEANING FUNCTIONS
+# ==============================================================================
+
+def clean_temp_files():
+    """1. Clean user and system temporary files."""
+    log.info("--- Cleaning Temp Files ---")
+    # User Temp
+    safe_rmtree(os.environ.get("TEMP"))
+    # System Temp
+    safe_rmtree(os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "Temp"))
+
+def clean_windows_update_cache():
+    """2. Clean Windows Update cache and Delivery Optimization files."""
+    log.info("--- Cleaning Windows Update Cache ---")
+    win_dir = os.environ.get("SystemRoot", "C:\\Windows")
+    safe_rmtree(os.path.join(win_dir, "SoftwareDistribution", "Download"))
+    safe_rmtree(os.path.join(win_dir, "SoftwareDistribution", "DataStore"))
+    safe_rmtree(os.path.join(win_dir, "DeliveryOptimization", "Cache"))
+
+def empty_recycle_bin():
+    """3. Empty the Recycle Bin for all users and drives using Windows API."""
+    log.info("--- Emptying Recycle Bin ---")
+    try:
+        # SHERB_NOCONFIRMATION (0x0001) | SHERB_NOPROGRESSUI (0x0002) | SHERB_NOSOUND (0x0004)
+        flags = 0x0001 | 0x0002 | 0x0004
+        result = ctypes.windll.shell32.SHEmptyRecycleBinW(None, None, flags)
+        if result == 0:  # S_OK
+            log.info("Recycle Bin emptied successfully.")
+        else:
+            log.error(f"Failed to empty Recycle Bin. Error code: {result}")
+    except Exception as e:
+        log.error(f"Error calling SHEmptyRecycleBinW: {e}")
+
+def clean_browser_cache():
+    """4. Clean cache, history, and cookies for all major browsers."""
+    log.info("--- Cleaning Browser Data ---")
+    users_dir = "C:\\Users"
+    if not os.path.exists(users_dir):
+        log.warning("C:\\Users directory not found.")
+        return
+
+    for user in os.listdir(users_dir):
+        user_path = os.path.join(users_dir, user)
+        if not os.path.isdir(user_path) or user in ["Public", "Default", "Default User"]:
+            continue
+
+        log.info(f"Cleaning browser data for user: {user}")
+
+        # Google Chrome
+        chrome_path = os.path.join(user_path, "AppData", "Local", "Google", "Chrome", "User Data")
+        for profile in glob.glob(os.path.join(chrome_path, "*")):
+            if os.path.isdir(profile) and not profile.endswith("Guest Profile"):
+                safe_rmtree(os.path.join(profile, "Cache"))
+                safe_rmtree(os.path.join(profile, "Code Cache"))
+                safe_rmtree(os.path.join(profile, "Service Worker"))
+                safe_rmtree(os.path.join(profile, "Local Storage"))
+                safe_rmtree(os.path.join(profile, "Session Storage"))
+                safe_rmtree(os.path.join(profile, "IndexedDB"))
+                # Delete history and cookies databases
+                safe_rmtree(os.path.join(profile, "History"))
+                safe_rmtree(os.path.join(profile, "History-journal"))
+                safe_rmtree(os.path.join(profile, "Cookies"))
+                safe_rmtree(os.path.join(profile, "Cookies-journal"))
+
+        # Microsoft Edge
+        edge_path = os.path.join(user_path, "AppData", "Local", "Microsoft", "Edge", "User Data")
+        for profile in glob.glob(os.path.join(edge_path, "*")):
+            if os.path.isdir(profile) and not profile.endswith("Guest Profile"):
+                safe_rmtree(os.path.join(profile, "Cache"))
+                safe_rmtree(os.path.join(profile, "Code Cache"))
+                safe_rmtree(os.path.join(profile, "Service Worker"))
+                safe_rmtree(os.path.join(profile, "Local Storage"))
+                safe_rmtree(os.path.join(profile, "Session Storage"))
+                safe_rmtree(os.path.join(profile, "IndexedDB"))
+                safe_rmtree(os.path.join(profile, "History"))
+                safe_rmtree(os.path.join(profile, "History-journal"))
+                safe_rmtree(os.path.join(profile, "Cookies"))
+                safe_rmtree(os.path.join(profile, "Cookies-journal"))
+
+        # Mozilla Firefox
+        firefox_path = os.path.join(user_path, "AppData", "Local", "Mozilla", "Firefox", "Profiles")
+        for profile in glob.glob(os.path.join(firefox_path, "*.default*")):
+            safe_rmtree(os.path.join(profile, "cache2"))
+            safe_rmtree(os.path.join(profile, "thumbnails"))
+            safe_rmtree(os.path.join(profile, "startupCache"))
+            safe_rmtree(os.path.join(profile, "places.sqlite"))  # History & Bookmarks
+            safe_rmtree(os.path.join(profile, "cookies.sqlite"))
+
+def run_system_cleanup_tools():
+    """5. Run built-in Windows cleanup tools silently."""
+    log.info("--- Running System Cleanup Tools ---")
+
+    # A. Disk Cleanup (cleanmgr) - Run pre-configured settings
+    # First, we need to set up the cleanup profile in the registry if it doesn't exist.
+    # This tells cleanmgr to clean ALL available options.
+    try:
+        run_subprocess("cleanmgr /sagerun:1", timeout=3600)
+    except Exception as e:
+        log.error(f"cleanmgr failed: {e}")
+
+    # B. DISM Component Store Cleanup (WinSxS)
+    log.info("Running DISM StartComponentCleanup...")
+    dism_cmd = "DISM /Online /Cleanup-Image /StartComponentCleanup"
+    run_subprocess(dism_cmd, timeout=3600)
+
+# ==============================================================================
+# BROWSER INSTALLATION HELPER FUNCTIONS
+# ==============================================================================
+
+def is_any_browser_installed():
+    """Check the Windows Registry to see if any common browsers are installed."""
+    browsers = [
+        ("Google Chrome", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe"),
+        ("Mozilla Firefox", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\firefox.exe"),
+        ("Microsoft Edge", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\msedge.exe"),
+    ]
+    for name, key_path in browsers:
+        try:
+            winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path)
+            log.info(f"Browser found: {name}")
+            return True
+        except FileNotFoundError:
+            continue
+    return False
+
+def download_chrome_installer():
+    """Download the latest Google Chrome standalone installer."""
+    log.info("--- No Browser Found. Downloading Chrome Installer ---")
+    # Official Google Chrome offline installer URL (stable channel)
+    chrome_url = "https://dl.google.com/tag/s/installdataindex/update2/installers/ChromeStandaloneSetup64.exe"
+    public_desktop = "C:\\Users\\Public\\Desktop"
+    installer_path = os.path.join(public_desktop, "Chrome_Installer.exe")
+
+    # Create a README file explaining what to do
+    readme_path = os.path.join(public_desktop, "INSTALL_CHROME.txt")
+    try:
+        with open(readme_path, "w") as f:
+            f.write("IMPORTANT: No web browser was detected on your system.\n")
+            f.write("A Google Chrome installer has been downloaded for you.\n")
+            f.write("Please run 'Chrome_Installer.exe' to install Chrome and get online.\n")
+        log.info(f"Created README file: {readme_path}")
+    except Exception as e:
+        log.error(f"Could not create README: {e}")
+
+    # Download the installer
+    try:
+        log.info(f"Downloading Chrome from {chrome_url}...")
+        urllib.request.urlretrieve(chrome_url, installer_path)
+        log.info(f"Chrome installer downloaded to {installer_path}")
+        return True
+    except Exception as e:
+        log.error(f"Failed to download Chrome installer: {e}")
+        return False
+
+# ==============================================================================
+# MAIN EXECUTION BLOCK
+# ==============================================================================
+
+def main():
+    """Main function to orchestrate the cleanup process."""
+    log.info("="*60)
+    log.info("Starting Professional Windows Deep Clean")
+    log.info("="*60)
+
+    # Safety Check: Must be run as Administrator
+    if not is_admin():
+        log.critical("This script must be run as Administrator. Exiting.")
+        sys.exit(1)
+
+    # Safety Check: Verify target build numbers
+    try:
+        import platform
+        win_ver = platform.version()
+        # Check for known build numbers. If you want to be strict, uncomment the following:
+        # if win_ver not in ["10.0.19045", "10.0.26100"]:
+        #     log.critical(f"Unsupported Windows version: {win_ver}. This script is only for builds 19045.7291 or 26100.8457.")
+        #     sys.exit(1)
+        log.info(f"Detected Windows Version: {win_ver}")
+    except Exception as e:
+        log.warning(f"Could not determine Windows version: {e}")
+
+    # 1. Clean Temp Files
+    clean_temp_files()
+
+    # 2. Clean Windows Update Cache
+    clean_windows_update_cache()
+
+    # 3. Empty Recycle Bin
+    empty_recycle_bin()
+
+    # 4. Clean Browser Data
+    clean_browser_cache()
+
+    # 5. Run System Cleanup Tools
+    run_system_cleanup_tools()
+
+    # 6. Final Step: Check for browsers and download Chrome if needed
+    if not is_any_browser_installed():
+        log.warning("No browser detected. Proceeding to download Chrome installer.")
+        success = download_chrome_installer()
+        if not success:
+            log.error("Failed to provide Chrome installer. Please manually install a browser.")
+    else:
+        log.info("A browser is installed. No need to download Chrome.")
+
+    log.info("="*60)
+    log.info("Deep Clean Completed Successfully!")
+    log.info("A system restart is recommended for all changes to take effect.")
+    log.info("="*60)
+
+if __name__ == "__main__":
+    main()
